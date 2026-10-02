@@ -1,0 +1,102 @@
+# External uptime check of https://bina.top, from GitHub's servers.
+# It complements the watchdog on the forum's own server (~/bina-watchdog), which cannot report
+# when the whole server or its network is down.
+#
+# Every 10 minutes: GET https://bina.top/api/config (through nginx and TLS). A failure is
+# retried twice, one minute apart, so a normal restart (~30 s) never alerts.
+#  - Down  -> opens an issue labelled "site-down" that mentions @szs-770 (GitHub emails it).
+#  - Up again while such an issue is open -> comments "back up" and closes it (also emailed).
+# One issue per outage, no repeated emails while it lasts.
+# Manual run with "simulate_down" checks a URL that does not exist, to test the alert.
+name: בדיקת זמינות bina.top
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+    inputs:
+      simulate_down:
+        description: 'בדיקה: לדמות שהאתר נפל'
+        type: boolean
+        default: false
+
+permissions:
+  issues: write
+  contents: read
+
+concurrency:
+  group: uptime
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Check https://bina.top
+        id: check
+        env:
+          URL: ${{ inputs.simulate_down && 'https://bina.top/api/uptime-simulated-down' || 'https://bina.top/api/config' }}
+        run: |
+          ok=false
+          detail=""
+          for attempt in 1 2 3; do
+            code=$(curl -sS -o body.json -w '%{http_code}' --max-time 20 \
+              -H 'User-Agent: bina-top-uptime (GitHub Actions)' "$URL" 2>err.txt || true)
+            if [ "$code" = "200" ] && grep -q '"url":"https://bina.top"' body.json; then
+              ok=true
+              break
+            fi
+            detail="HTTP ${code:-000} $(tr '\n' ' ' < err.txt | head -c 200)"
+            echo "attempt $attempt failed: $detail"
+            if [ "$attempt" -lt 3 ]; then sleep 60; fi
+          done
+          echo "ok=$ok" >> "$GITHUB_OUTPUT"
+          echo "detail=$detail" >> "$GITHUB_OUTPUT"
+          echo "ok=$ok $detail"
+
+      - name: Open or close the "site down" issue
+        uses: actions/github-script@v7
+        env:
+          OK: ${{ steps.check.outputs.ok }}
+          DETAIL: ${{ steps.check.outputs.detail }}
+          SIMULATED: ${{ inputs.simulate_down && 'true' || 'false' }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const label = 'site-down';
+            const ok = process.env.OK === 'true';
+            const when = new Date().toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem' });
+            const open = await github.rest.issues.listForRepo({ owner, repo, state: 'open', labels: label });
+
+            if (!ok && !open.data.length) {
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name: label });
+              } catch (e) {
+                await github.rest.issues.createLabel({ owner, repo, name: label, color: 'd73a4a', description: 'bina.top לא זמין' });
+              }
+              const test = process.env.SIMULATED === 'true' ? ' (בדיקה מדומה)' : '';
+              await github.rest.issues.create({
+                owner, repo, labels: [label],
+                title: `🔴 bina.top לא זמין${test}`,
+                body: [
+                  `@${owner} האתר https://bina.top לא עונה${test}.`,
+                  '',
+                  `- **זמן:** ${when} (שעון ישראל)`,
+                  `- **פרטים:** ${process.env.DETAIL || 'אין'}`,
+                  '- **נבדק:** 3 ניסיונות, בהפרש של דקה, משרתי GitHub (מחוץ לשרת של הפורום).',
+                  '',
+                  'אם גם השרת עצמו לא שלח מייל, ייתכן שהשרת כולו או הרשת שלו נפלו.',
+                  'כשהאתר יחזור, ה־issue ייסגר אוטומטית ותקבלו על כך הודעה.',
+                ].join('\n'),
+              });
+              core.notice('site down: issue opened');
+            } else if (ok && open.data.length) {
+              for (const issue of open.data) {
+                await github.rest.issues.createComment({ owner, repo, issue_number: issue.number, body: `🟢 @${owner} האתר חזר לפעול (${when}, שעון ישראל).` });
+                await github.rest.issues.update({ owner, repo, issue_number: issue.number, state: 'closed', state_reason: 'completed' });
+              }
+              core.notice('site back up: issue closed');
+            } else {
+              core.info(ok ? 'site up' : 'site still down (issue already open)');
+            }
