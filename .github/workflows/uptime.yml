@@ -56,7 +56,7 @@ jobs:
           echo "ok=$ok $detail"
 
       - name: Open or close the "site down" issue
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           OK: ${{ steps.check.outputs.ok }}
           DETAIL: ${{ steps.check.outputs.detail }}
