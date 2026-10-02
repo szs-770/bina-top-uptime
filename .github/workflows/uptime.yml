@@ -63,6 +63,8 @@ jobs:
           SIMULATED: ${{ inputs.simulate_down && 'true' || 'false' }}
         with:
           script: |
+            // current REST API version (the default 2022-11-28 is deprecated, removed in 2028)
+            github.hook.before('request', (options) => { options.headers['x-github-api-version'] = '2026-03-10'; });
             const { owner, repo } = context.repo;
             const label = 'site-down';
             const ok = process.env.OK === 'true';
